@@ -1,6 +1,6 @@
 # Real-Time Fluid Simulation (CUDA + OpenGL Interop)
 
-[Video]
+https://github.com/user-attachments/assets/54c06561-f404-48c5-af3e-17ef7c0e9dc4
 
 A real-time, GPU-accelerated 2D FLIP fluid simulation written in C++ and CUDA with direct OpenGL interop. The physics and grid transfers are based on Matthias Müller's [Ten Minute Physics FLIP tutorial](https://github.com/matthias-research/pages/blob/master/tenMinutePhysics/18-flip.html), fully ported to a parallel CUDA pipeline. Broad-phase particle collisions are handled via spatial hashing based on [GPU Gems 3 (Chapter 32)](https://developer.nvidia.com/gpugems/gpugems3/part-v-physics-simulation/chapter-32-broad-phase-collision-detection-cuda), enhanced with atomic operations.
 
@@ -40,7 +40,7 @@ Profiled and validated using **NVIDIA Nsight Compute**:
 * GLFW, GLM, Glad (configured in repository)
 
 ```bash
-git clone --recursive [https://github.com/wszystkonietak/flip-fluid-sim.git](https://github.com/wszystkonietak/flip-fluid-sim.git)
+git clone --recursive https://github.com/wszystkonietak/flip-fluid-sim.git
 cd flip-fluid-sim
 mkdir build && cd build
 cmake ..
