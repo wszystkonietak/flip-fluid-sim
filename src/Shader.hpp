@@ -15,8 +15,8 @@ class Shader {
  public:
   unsigned int ID;
   Shader() = default;
-  Shader(const std::string&& vertexPath, const std::string&& fragmentPath,
-         const std::string&& geometryPath = "") {
+  Shader(const std::string& vertexPath, const std::string& fragmentPath,
+         const std::string& geometryPath = "") {
     std::string vertexCode;
     std::string fragmentCode;
     std::string geometryCode;

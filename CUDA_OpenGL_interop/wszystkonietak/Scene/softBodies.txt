@@ -1,1 +1,0 @@
-SoftBody(glm::vec2 size, float_t default_rest_length, glm::vec2 start) <--- constructor

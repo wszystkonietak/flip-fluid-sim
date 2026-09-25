@@ -25,7 +25,7 @@ class OrthographicCamera {
                      float_t near = 1.0f, float_t far = 10.0f,
                      glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f));
 
-  void load(const std::string& project_path, Properties& properties);
+  void load(Properties& properties);
   void init(float_t left, float_t right, float_t bottom, float_t top,
             float_t near, float_t far, glm::vec3 position);
 

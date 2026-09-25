@@ -1,12 +1,11 @@
 #include "Project.hpp"
 
-Project::Project(std::string& project_path) {
-  this->project_path = project_path;
+Project::Project() {
   this->init();
 }
 
 void Project::init() {
-  properties.load(project_path);
+  properties.load();
   glfwInit();
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
@@ -24,8 +23,8 @@ void Project::init() {
   glClearColor(properties.background_color.x, properties.background_color.y,
                properties.background_color.z, 1.0f);
   glEnable(GL_PROGRAM_POINT_SIZE);
-  scene.load(project_path);
-  camera.load(project_path, properties);
+  scene.load();
+  camera.load(properties);
   scene.setCameraProjection(camera);
   scene.setCameraZoom(camera, FrameHandler(properties));
   glfwSwapInterval(0);

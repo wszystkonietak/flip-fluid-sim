@@ -154,58 +154,20 @@ void OrthographicCamera::recalculateViewMatrix() {
   projection_view_matrix = projection_matrix * view_matrix;
 }
 
-void OrthographicCamera::load(const std::string& project_path,
-                              Properties& properties) {
-  std::string orthographic_camera_path =
-      project_path + "/Camera/orthographicCamera.txt";
-  std::string orthographic_camera_properties_path =
-      project_path + "/Camera/orthographicCameraProperties.txt";
-  std::vector<std::string> lines = loadFile(orthographic_camera_path);
-  float_t right = 0, left = 0, top = 0, bottom = 0, near = 0, far = 0;
-  glm::vec3 position(0, 0, 0);
-  for (auto& line : lines) {
-    size_t delimiter_pos = line.find(": ");
-    if (delimiter_pos != std::string::npos) {
-      std::string key = line.substr(0, delimiter_pos);
-      std::string value = line.substr(delimiter_pos + 2);
-      if (key == "right") {
-        right = std::stof(value);
-      } else if (key == "left") {
-        left = std::stof(value);
-      } else if (key == "top") {
-        top = std::stof(value);
-      } else if (key == "bottom") {
-        bottom = std::stof(value);
-      } else if (key == "near") {
-        near = std::stof(value);
-      } else if (key == "far") {
-        far = std::stof(value);
-      } else if (key == "position") {
-        std::vector<std::string> s_position = split(value, ", ");
-        position = glm::vec3(std::stof(s_position[0]), std::stof(s_position[1]),
-                             std::stof(s_position[2]));
-      }
-    }
-  }
-  lines = loadFile(orthographic_camera_properties_path);
-  for (auto& line : lines) {
-    size_t delimiter_pos = line.find(": ");
-    if (delimiter_pos != std::string::npos) {
-      std::string key = line.substr(0, delimiter_pos);
-      std::string value = line.substr(delimiter_pos + 2);
-      if (key == "min_zoom") {
-        this->properties.min_zoom = std::stof(value);
-      } else if (key == "max_zoom") {
-        this->properties.max_zoom = std::stof(value);
-      } else if (key == "far_speed") {
-        this->properties.far_speed = std::stof(value);
-      } else if (key == "close_speed") {
-        this->properties.close_speed = std::stof(value);
-      }
-    } else {
-      printf("%s error\n", orthographic_camera_properties_path.c_str());
-    }
-  }
-  this->frustum_ratio = properties.scr_width / top;
-  init(left, right, bottom, top, near, far, position);
+void OrthographicCamera::load(Properties& app_properties) {
+  float_t left = 0.0f;
+  float_t right = 1.0f;
+  float_t bottom = 0.0f;
+  float_t top = 1.0f;
+  float_t near = -1.0f;
+  float_t far = 1.0f;
+  glm::vec3 start_position(0.0f, 0.0f, 0.0f);
+
+  this->properties.min_zoom = 0.0f;
+  this->properties.max_zoom = 0.99f;
+  this->properties.far_speed = 0.1f;
+  this->properties.close_speed = 0.00001f;
+
+  this->frustum_ratio = app_properties.scr_width / top;
+  init(left, right, bottom, top, near, far, start_position);
 }

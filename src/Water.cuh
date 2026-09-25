@@ -11,11 +11,11 @@
 
 class FlipFluid {
  public:
-  FlipFluid(glm::vec2&& size, std::string&& shaders_path)
-      : size(std::move(size)) {
-    init(std::move(shaders_path));
+  FlipFluid(glm::vec2 size)
+      : size(size) {
+    init();
   }
-  void init(std::string&& shaders_path);
+  void init();
   void update();
   void draw();
   void set_interaction_data(const glm::vec2& cursor_pos,

@@ -5,11 +5,7 @@ Scene::Scene(std::vector<SoftBody> softBodies, std::vector<Shader> shaders) {
   this->shaders = shaders;
 }
 
-void Scene::load(const std::string& project_path) {
-  scene_path = project_path + "/Scene";
-
-  loadSoftBodies();
-  loadParticles();
+void Scene::load() {
   loadShaders();
   loadCanvases();
   loadFluids();
@@ -111,54 +107,25 @@ void Scene::setCameraProjection(const OrthographicCamera& camera) {
                                camera.getProjectionViewMatrix());
 }
 
-void Scene::loadSoftBodies() {
-  std::vector<std::string> lines = loadFile(scene_path + "/softBodies.txt");
-  lines.erase(lines.begin());
-  for (auto& line : lines) {
-    std::vector<std::string> numbers = split(line, ", ");
-    if (numbers.size()) {
-      float_t sizeX = std::stof(numbers[0]);
-      float_t sizeY = std::stof(numbers[1]);
-      float_t restLength = std::stof(numbers[2]);
-      float_t startX = std::stof(numbers[3]);
-      float_t startY = std::stof(numbers[4]);
-
-      softBodies.push_back(SoftBody(glm::vec2(sizeX, sizeY), restLength,
-                                    glm::vec2(startX, startY)));
-    }
-  }
-}
-
-void Scene::loadParticles() {
-  std::vector<std::string> lines = loadFile(scene_path + "/particles.txt");
-  lines.erase(lines.begin());
-  for (auto& line : lines) {
-    std::vector<std::string> numbers = split(line, ", ");
-    if (numbers.size()) {
-      float_t scene_width = std::stof(numbers[0]);
-      float_t scene_height = std::stof(numbers[1]);
-      float_t particle_radius = std::stof(numbers[2]);
-      int num_particles = std::stoi(numbers[3]);
-
-      particles.emplace_back(scene_width, scene_height, particle_radius,
-                             num_particles);
-    }
-  }
-}
-
 void Scene::loadShaders() {
-  std::string shaderFolderPath = scene_path + "/Shaders/";
-  std::vector<std::string> lines = loadFile(shaderFolderPath + "shaders.txt");
-  for (auto& line : lines) {
-    std::ifstream file(line + ".geom");
-    if (file.is_open()) {
-      shaders.push_back(Shader(shaderFolderPath + line + ".vert",
-                               shaderFolderPath + line + ".frag",
-                               shaderFolderPath + line + ".geom"));
-      file.close();
+  const std::string shaderDir = "shaders/";
+
+  const std::vector<std::string> shaderNames = {"basic", "softBody",
+                                                "particles"};
+
+  shaders.clear();
+  shaders.reserve(shaderNames.size());
+
+  for (const auto& name : shaderNames) {
+    std::string vertPath = shaderDir + name + ".vert";
+    std::string fragPath = shaderDir + name + ".frag";
+    std::string geomPath = shaderDir + name + ".geom";
+
+    std::ifstream geomFile(geomPath);
+    if (geomFile.good()) {
+      shaders.push_back(Shader(vertPath, fragPath, geomPath));
     } else {
-      shaders.push_back(Shader(shaderFolderPath + line + ".vert",
-                               shaderFolderPath + line + ".frag", ""));
+      shaders.push_back(Shader(vertPath, fragPath, ""));
     }
   }
 }
@@ -169,5 +136,5 @@ void Scene::loadCanvases() {
 }
 
 void Scene::loadFluids() {
-  fluids.emplace_back(glm::vec2(1, 1), scene_path + "/Shaders/");
+  fluids.emplace_back(glm::vec2(1.0f, 1.0f));
 }

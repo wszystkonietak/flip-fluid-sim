@@ -8,7 +8,7 @@
 
 class Project {
  public:
-  Project(std::string& project_path);
+  Project();
   void init();
   void run();
 
@@ -24,5 +24,4 @@ class Project {
   void frame_render();
   void frame_end();
   GLFWwindow* window;
-  std::string project_path;
 };

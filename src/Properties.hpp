@@ -17,7 +17,7 @@ class Properties {
         frame_rate_limit(60) {
     name = "";
   }
-  void load(const std::string& project_path);
+  void load();
   std::string name;
   uint32_t scr_width;
   uint32_t scr_height;

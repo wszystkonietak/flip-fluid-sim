@@ -207,13 +207,11 @@ __global__ void grid_to_particles(float2* grid_velocities, Particles particles,
   particles.velocities[g_id] = make_float2(vel_u, vel_v);
 }
 
-void FlipFluid::init(std::string&& shaders_path) {
-  cell_size = 0.02;
-  particle_radius = 0.0033;
-  s_textures =
-      Shader(shaders_path + "/canvas.vert", shaders_path + "/canvas.frag");
-  s_particles = Shader(shaders_path + "/particles.vert",
-                       shaders_path + "/particles.frag");
+void FlipFluid::init() {
+  cell_size = 0.02f;
+  particle_radius = 0.0033f;
+  s_textures = Shader("shaders/canvas.vert", "shaders/canvas.frag");
+  s_particles = Shader("shaders/particles.vert", "shaders/particles.frag");
   s_particles.use();
   s_particles.setMat4("u_projectionViewMatrix",
                       glm::ortho(0.0f, 1.0f, 0.0f, 1.0f, -1.0f, 1.0f));
