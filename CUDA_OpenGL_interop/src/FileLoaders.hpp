@@ -1,10 +1,10 @@
 
-#include <vector>
-#include <string>
 #include <fstream>
-#include <sstream>
-#include <map>
 #include <iostream>
+#include <map>
+#include <sstream>
+#include <string>
+#include <vector>
 
 std::vector<std::string> loadFile(const std::string& filename);
 

@@ -2,5 +2,5 @@ project name: wszystkonietak
 width: 800
 height: 800
 fullscreen: false
-background color: 0.3, 0.4, 0.5
+background color: 0.051, 0.067, 0.090
 frame rate limit: 60

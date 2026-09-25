@@ -1,5 +1,5 @@
 syntax: glob
-
+.vs
 .DS_Store
 
 *.bak

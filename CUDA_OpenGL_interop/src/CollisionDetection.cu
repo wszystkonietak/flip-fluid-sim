@@ -1,606 +1,537 @@
+#include <math.h>
+
+#include <algorithm>
+#include <iostream>
+
 #include "CollisionDetection.cuh"
 
-//kernels
+struct ConstantsInitData {
+  float diameter;
+  float radius;
+  unsigned int x_shift;
+  unsigned int objects_size;
+  unsigned int width;
+  unsigned int height;
+};
+
+struct ConstantsCountCollisionCells {
+  unsigned int cell_count;
+  unsigned int cells_per_thread;
+  unsigned int x_shift;
+  unsigned int max_grid_capacity;
+};
+
+
 __device__ void dSum(unsigned int* values, unsigned int* out) {
-	__syncthreads();
-
-	unsigned int threads = blockDim.x;
-	unsigned int half = threads / 2;
-
-	while (half) {
-		if (threadIdx.x < half) {
-			for (int k = threadIdx.x + half; k < threads; k += half) {
-				values[threadIdx.x] += values[k];
-			}
-			threads = half;
-		}
-		half /= 2;
-		__syncthreads();
-	}
-
-	if (!threadIdx.x) {
-		atomicAdd(out, values[0]);
-	}
+  __syncthreads();
+  for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      values[threadIdx.x] += values[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    atomicAdd(out, values[0]);
+  }
 }
 
-__device__ void d_prefix_sum(unsigned int* values, unsigned int n) {
-	int offset = 1;
-	int a;
-	for (int d = n >> 1; d > 0; d >>= 1) {
-		__syncthreads();
-		if (threadIdx.x < d) {
-			a = offset * (2 * threadIdx.x + 1) - 1;
-			values[a + offset] += values[a];
-		}
-		offset <<= 1;
-	}
+__device__ void processPair(unsigned int objA_id, unsigned int objB_id,
+                            float2& posA, float2& posB, float2* positions,
+                            float radius, float dist_threshold,
+                            unsigned int& local_count) {
+  float dx = posA.x - posB.x;
+  float dy = posA.y - posB.y;
 
-	if (!threadIdx.x) {
-		values[n - 1] = 0;
-	}
+  float dist_sq = __fadd_rn(__fmul_rn(dx, dx), __fmul_rn(dy, dy));
 
-	for (int d = 1; d < n; d *= 2) {
-		offset >>= 1;//128, 64, 32, 16, 8, 4, 2, 1
-		__syncthreads();
-		if (threadIdx.x < d) {//1, 2, 4, 8, 16, 32, 64, 128
-			int a = offset * (2 * threadIdx.x + 1) - 1;
-			float t = values[a];
-			values[a] = values[a + offset];
-			values[a + offset] += t;
-		}
-	}
+  if (dist_sq <= dist_threshold) {
+    local_count++;
+
+    if (dist_sq > 1e-8f) {
+      float dist = sqrtf(dist_sq);
+      dx /= dist;
+      dy /= dist;
+
+      float push_mag = (2.0001f * radius - dist) / 2.0f;
+
+      posA.x += dx * push_mag;
+      posA.y += dy * push_mag;
+
+      posB.x -= dx * push_mag;
+      posB.y -= dy * push_mag;
+
+      positions[objA_id] = posA;
+      positions[objB_id] = posB;
+    } else {
+      posA.x += radius;
+      posB.x -= radius;
+      posB.y += radius;
+      posA.y -= radius;
+
+      positions[objA_id] = posA;
+      positions[objB_id] = posB;
+    }
+  }
 }
 
-__global__ void initData(Particle* particles, unsigned int* cells, unsigned int* objects, unsigned int* cell_count, ConstantsInitData constants) {
-	extern __shared__ unsigned int s[];
-	unsigned int count = 0;
-	unsigned int g_id = blockIdx.x * blockDim.x + threadIdx.x;
-	float dist;
-	float pos_x, pos_y;
-	unsigned int cell_x;
-	unsigned int cell_y;
-	unsigned int l_id;
-	int addValX, addValY;
-	int tmp_cell;
-	while (g_id < constants.objects_size) {
-		count++;
-		pos_x = particles[g_id].position.x;
-		pos_y = particles[g_id].position.y;
-		cell_x = (unsigned int)(pos_x / constants.diameter);
-		cell_y = (unsigned int)(pos_y / constants.diameter);
-		cells[4 * g_id] = (((cell_x << constants.x_shift) | cell_y) << 1) | 0x00;
-		objects[4 * g_id] = g_id << 1 | 0x01;
+__global__ void applyBoundaries(float2* positions, float scene_width,
+                                float scene_height, float radius,
+                                unsigned int objects_size) {
+  unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < objects_size) {
+    float2 pos = positions[idx];
 
-		l_id = 1;
+    pos.x = max(radius, min(scene_width - radius, pos.x));
+    pos.y = max(radius, min(scene_height - radius, pos.y));
 
-		addValX = -1;
-		addValY = -1;
-
-		tmp_cell = (unsigned int)((pos_x + constants.radius) / constants.diameter);
-		if (tmp_cell > cell_x) {
-			cells[4 * g_id + l_id] = (((tmp_cell << constants.x_shift) | cell_y) << 1) | 0x01;
-			objects[4 * g_id + l_id] = g_id << 1 | 0x00;
-			l_id++;
-			count++;
-			addValX = 1;
-		}
-		tmp_cell = (unsigned int)((pos_x - constants.radius) / constants.diameter);
-		if (tmp_cell < cell_x) {
-			cells[4 * g_id + l_id] = (((tmp_cell << constants.x_shift) | cell_y) << 1) | 0x01;
-			objects[4 * g_id + l_id] = g_id << 1 | 0x00;
-			l_id++;
-			count++;
-		}
-		tmp_cell = (unsigned int)((pos_y + constants.radius) / constants.diameter);
-		if (tmp_cell > cell_y) {
-			cells[4 * g_id + l_id] = (((cell_x << constants.x_shift) | tmp_cell) << 1) | 0x01;
-			objects[4 * g_id + l_id] = g_id << 1 | 0x00;
-			l_id++;
-			count++;
-			addValY = 1;
-		}
-		tmp_cell = (unsigned int)((pos_y - constants.radius) / constants.diameter);
-		if (tmp_cell < cell_y) {
-			cells[4 * g_id + l_id] = (((cell_x << constants.x_shift) | tmp_cell) << 1) | 0x01;
-			objects[4 * g_id + l_id] = g_id << 1 | 0x00;
-			l_id++;
-			count++;
-		}
-		dist = (pos_x - (cell_x * constants.diameter + constants.radius)) * (pos_x - (cell_x * constants.diameter + constants.radius)) + (pos_y - (cell_y * constants.diameter + constants.radius)) * (pos_y - (cell_y * constants.diameter + constants.radius));
-		if (dist > constants.max_distance_squared) {
-			cells[4 * g_id + l_id] = ((((cell_x + addValX) << constants.x_shift) | (cell_y + addValY)) << 1) | 0x01;
-			objects[4 * g_id + l_id] = g_id << 1 | 0x00;
-			count++;
-		}
-		else {
-			cells[4 * g_id + l_id] = UINT_MAX;
-			objects[4 * g_id + l_id] = g_id << 2;
-		}
-		if (l_id == 2) {
-			cells[4 * g_id + 3] = UINT_MAX;
-			objects[4 * g_id + 3] = g_id << 2;
-		}
-
-		g_id += blockDim.x * gridDim.x;
-	}
-	s[threadIdx.x] = count;
-	__syncthreads();
-	dSum(s, cell_count);
+    positions[idx] = pos;
+  }
 }
 
-__global__ void radixSetup(unsigned int* radices, unsigned int* cells, const unsigned int shift, ConstantsRadixSetUp constants) {
-	extern __shared__ unsigned int s[];
-	int l_group = threadIdx.x / constants.threads_per_group;
-	int group_start = (blockIdx.x * constants.groups_per_block + l_group) * constants.cells_per_group;
-	int group_end = group_start + constants.cells_per_group;
-	int index;
-	for (int i = threadIdx.x; i < constants.shared_memory_size; i += blockDim.x) {
-		s[i] = 0;
-	}
-	__syncthreads();
-	for (int i = group_start + (threadIdx.x % constants.threads_per_group); (i < group_end) && (i < constants.cells_size); i += constants.threads_per_group) {
-		index = ((cells[i] >> shift) & (constants.num_radices - 1)) + l_group * constants.num_radices;
-		for (int j = 0; j < constants.threads_per_group; j++) {
-			if (threadIdx.x % constants.threads_per_group == j) {
-				s[index]++;
-			}
-		}
-	}
-	__syncthreads();
-	for (int i = threadIdx.x; i < constants.shared_memory_size; i += blockDim.x) {
-		radices[((i % constants.num_radices) * gridDim.x * constants.groups_per_block) + (blockIdx.x * constants.groups_per_block + i / constants.num_radices)] = s[i];//((i % constants.num_radices) * gridDim.x * constants.groups_per_block) + (blockIdx.x * constants.groups_per_block + i / constants.num_radices);
-	}
-}
-__global__ void radixSum(unsigned int* radices, unsigned int* radices_prefix_sum, ConstantsRadixSum constants) {
-	extern __shared__ unsigned int s[];
-	int left = 0;
-	int total;
-	int empty_index;
-	for (int j = 0; j < constants.radices_per_block && (blockIdx.x * constants.radices_per_block + j) < constants.num_radices; j++) {
-		for (int i = threadIdx.x; i < constants.num_groups; i += blockDim.x) {
-			s[i] = radices[blockIdx.x * constants.num_groups * constants.radices_per_block + j * constants.num_groups + i];
-		}
-		__syncthreads();
-		empty_index = threadIdx.x + constants.num_groups;
-		if (empty_index < constants.padded_groups) {
-			s[empty_index] = 0;
-		}
-		__syncthreads();
+__global__ void initData(float2* positions, unsigned int* cells,
+                         unsigned int* objects, unsigned int* cell_count,
+                         unsigned int* control_bits,
+                         ConstantsInitData constants) {
+  extern __shared__ unsigned int s[];
+  unsigned int count = 0;
+  unsigned int g_id = blockIdx.x * blockDim.x + threadIdx.x;
 
-		if (!threadIdx.x) {
-			total = s[constants.num_groups - 1];
-		}
-		d_prefix_sum(s, constants.padded_groups);
+  while (g_id < constants.objects_size) {
+    count++;
+    float pos_x = positions[g_id].x;
+    float pos_y = positions[g_id].y;
 
-		__syncthreads();
+    int cell_x = max(0, min((int)constants.width - 1,
+                            (int)floorf(pos_x / constants.diameter)));
+    int cell_y = max(0, min((int)constants.height - 1,
+                            (int)floorf(pos_y / constants.diameter)));
+    unsigned int type = (cell_x & 1) | ((cell_y & 1) << 1);
 
-		for (int i = threadIdx.x; i < constants.num_groups; i += blockDim.x) {
-			radices[blockIdx.x * constants.num_groups * constants.radices_per_block + j * constants.num_groups + i] = s[i];
-		}
+    unsigned int mask = (1 << type);
 
-		__syncthreads();
+    bool right = false, left = false, up = false, down = false;
+    if (pos_x + constants.radius > (cell_x + 1) * constants.diameter &&
+        (cell_x + 1) < constants.width)
+      right = true;
+    else if (pos_x - constants.radius < cell_x * constants.diameter &&
+             cell_x > 0)
+      left = true;
 
-		if (!threadIdx.x) {
-			total += s[constants.num_groups - 1];
-			radices_prefix_sum[blockIdx.x * constants.radices_per_block + j] = left;
-			left += total;
-		}
-	}
-	__syncthreads();
-	if (!threadIdx.x) {
-		radices_prefix_sum[constants.num_radices + blockIdx.x] = left;
-	}
-}
-__global__ void radixReorder(unsigned int* radices_prefix_sum, unsigned int* radices, unsigned int* cells, unsigned int* objects, unsigned int* cells_out, unsigned int* objects_out, const unsigned int shift, ConstantsRadixReorder constants) {
-	extern __shared__ unsigned int s[];
-	unsigned int* t = s + constants.num_radices;
-	int l_group = threadIdx.x / constants.threads_per_group;
-	int group_start = (blockIdx.x * constants.groups_per_block + l_group) * constants.cells_per_group;
-	int group_end = group_start + constants.cells_per_group;
-	int index;
-	for (int i = threadIdx.x; i < constants.num_radices; i += blockDim.x) {
-		s[i] = radices_prefix_sum[i];
-		if (i < gridDim.x) {
-			t[i] = radices_prefix_sum[constants.num_radices + i];
-		}
-	}
-	__syncthreads();
-	for (int i = threadIdx.x + gridDim.x; i < constants.padded_blocks; i += blockDim.x) {
-		t[i] = 0;
-	}
-	d_prefix_sum(t, constants.padded_blocks);
-	__syncthreads();
-	for (int i = threadIdx.x; i < constants.num_radices; i += blockDim.x) {
-		s[i] += t[i / constants.radices_per_block];
-	}
-	__syncthreads();
-	////can be deleted
-	//if (!blockIdx.x) {
-	//	for (int i = threadIdx.x; i < constants.num_radices; i += blockDim.x) {
-	//		radices_prefix_sum_help[i] = s[i];
-	//	}
-	//}
-	for (int i = threadIdx.x; i < constants.groups_per_block * constants.num_radices; i += blockDim.x) {
-		//radices[blockIdx.x * constants.groups_per_block * constants.num_radices + i] = 5; s[i / constants.groups_per_block];//((i % constants.num_radices) * gridDim.x * constants.groups_per_block) + (blockIdx.x * constants.groups_per_block + i / constants.num_radices);
-		//radices_help[blockIdx.x * constants.groups_per_block * constants.num_radices + i] = s[i % constants.num_radices] + radices[((i % constants.num_radices) * gridDim.x * constants.groups_per_block) + (blockIdx.x * constants.groups_per_block + i / constants.num_radices)];
+    if (pos_y + constants.radius > (cell_y + 1) * constants.diameter &&
+        (cell_y + 1) < constants.height)
+      up = true;
+    else if (pos_y - constants.radius < cell_y * constants.diameter &&
+             cell_y > 0)
+      down = true;
 
-		//this have to be uncomented!!!
-		t[i] = s[i % constants.num_radices] + radices[((i % constants.num_radices) * gridDim.x * constants.groups_per_block) + (blockIdx.x * constants.groups_per_block + i / constants.num_radices)];
-	}
-	//uncomment!!!
-	__syncthreads();
-	for (int i = group_start + (threadIdx.x % constants.threads_per_group); (i < group_end) && (i < constants.cells_size); i += constants.threads_per_group) {
-		index = ((cells[i] >> shift) & (constants.num_radices - 1)) + l_group * constants.num_radices;
-		for (int j = 0; j < constants.threads_per_group; j++) {
-			if (threadIdx.x % constants.threads_per_group == j) {
-				cells_out[t[index]] = cells[i];
-				objects_out[t[index]] = objects[i];
-				t[index]++;
-			}
-		}
-	}
-}
+    int boundaries =
+        (right ? 1 : 0) + (left ? 1 : 0) + (up ? 1 : 0) + (down ? 1 : 0);
+    int addValX = right ? 1 : (left ? -1 : 0);
+    int addValY = up ? 1 : (down ? -1 : 0);
 
-__global__ void cellColide(unsigned int* cells, unsigned int* objects, unsigned int cells_per_thread, Particle* particles, unsigned int* collisions_count, unsigned int cell_count, ConstantsCellColide constants, unsigned int* particles_coliding_indices) {
-	extern __shared__ unsigned int s[];
-	if (!threadIdx.x) { s[0] = 0; }
-	unsigned int thread_start = (blockIdx.x * blockDim.x + threadIdx.x) * cells_per_thread;
-	unsigned int thread_end = thread_start + cells_per_thread;
-	unsigned int last = UINT_MAX;
-	unsigned int i = thread_start;
-	unsigned int home_cell_count;
-	unsigned int phantom_cell_count;
-	unsigned int current_home;
-	unsigned int current_phantom;
-	int cell_start_index = -1;
-	float dist;
-	float dx;
-	float dy;
-	unsigned int collisions = 0;
-	unsigned int id = 0;
-	float dist2;
-	float2 pos_a, pos_b;
-	float temp;
-	while (1) {
-		if (i >= cell_count || cells[i] >> 1 != last) {
-			if (cell_start_index + 1 && home_cell_count > 0 && (home_cell_count + phantom_cell_count) > 1) {
-				for (int j = cell_start_index; j < cell_start_index + home_cell_count; j++) {
-					current_home = objects[j] >> 1;
-					
-					for (int k = j + 1; k < i; k++) {
-						current_phantom = objects[k] >> 1;
-						pos_a.x = particles[current_phantom].position.x;
-						pos_a.y = particles[current_phantom].position.y;
-						pos_b.x = particles[current_home].position.x;
-						pos_b.y = particles[current_home].position.y;
-						//dx = particles[current_phantom].position.x - particles[current_home].position.x;
-						//dy = particles[current_phantom].position.y - particles[current_home].position.y;
-						dx = pos_a.x - pos_b.x + 0.000001;
-						dy = pos_a.y - pos_b.y + 0.000001;
-						dist = dx * dx + dy * dy;
-						if (dist < constants.diameter_squared) {
-							//id = atomicAdd(&s[0], 1);
-							/*if ((current_phantom < current_home) && (k > cell_start_index + home_cell_count)) {
-								continue;
-							}*/
-							//atomicAdd(&collisions, 1);
-							//if (id < 1000) {
-							//	atomicExch(&particles_coliding_indices[blockIdx.x * 2000 + 2 * id], current_home);
-							//	atomicExch(&particles_coliding_indices[blockIdx.x * 2000 + 2 * id + 1], current_phantom);
-							//	/*particles_coliding_indices[blockIdx.x * 2000 + 2 * id] = current_home;
-							//	particles_coliding_indices[blockIdx.x * 2000 + 2 * id + 1] = current_phantom;*/
-							//} 
-							/*particles[current_home].position.x = 0.0f;
-							particles[current_home].position.y = 0.0f;
-							particles[current_phantom].position.x = 0.0f;
-							particles[current_phantom].position.y = 0.0f;*/
-							dist = sqrt(dist);
-							dx /= dist;
-							dy /= dist;
-							pos_b.x -= dx * (3 * constants.radius - dist) / 2;
-							pos_b.y -= dy * (3 * constants.radius - dist) / 2;
+    if (right)
+      mask |= (1 << (((cell_x + 1) & 1) | ((cell_y & 1) << 1)));
+    else if (left)
+      mask |= (1 << (((cell_x - 1) & 1) | ((cell_y & 1) << 1)));
+    if (up)
+      mask |= (1 << ((cell_x & 1) | (((cell_y + 1) & 1) << 1)));
+    else if (down)
+      mask |= (1 << ((cell_x & 1) | (((cell_y - 1) & 1) << 1)));
+    if (boundaries == 2)
+      mask |=
+          (1 << (((cell_x + addValX) & 1) | (((cell_y + addValY) & 1) << 1)));
 
-							pos_a.x += dx * (3 * constants.radius - dist) / 2;
-							pos_a.y += dy * (3 * constants.radius - dist) / 2;
-							pos_a.x = fmaxf(fminf(pos_a.x, constants.scene_width), constants.radius);
-							pos_a.y = fmaxf(fminf(pos_a.y, constants.scene_hieght), constants.radius);
-							pos_b.x = fmaxf(fminf(pos_b.x, constants.scene_width), constants.radius);
-							pos_b.y = fmaxf(fminf(pos_b.y, constants.scene_hieght), constants.radius);
-							atomicExch(&particles[current_phantom].position.x, pos_a.x);
-							atomicExch(&particles[current_home].position.x, pos_b.x);
+    control_bits[g_id] = (mask << 2) | type;
 
-							atomicExch(&particles[current_phantom].position.y, pos_a.y);
-							atomicExch(&particles[current_home].position.y, pos_b.y);
+    cells[4 * g_id] =
+        ((((unsigned int)cell_x << constants.x_shift) | (unsigned int)cell_y)
+         << 1) |
+        0x00;
+    objects[4 * g_id] = g_id << 1 | 0x01;
 
-							//temp = particles[current_phantom].velocity.x;
-							//atomicExch(&particles[current_phantom].velocity.x, particles[current_home].velocity.x);
-							//atomicExch(&particles[current_home].velocity.x, temp);
+    unsigned int l_id = 1;
 
-							//// Swap velocity.y
-							//temp = particles[current_phantom].velocity.y;
-							//atomicExch(&particles[current_phantom].velocity.y, particles[current_home].velocity.y);
-							//atomicExch(&particles[current_home].velocity.y, temp);
-							//dist -= dist;
-							//atomicAdd(&particles[current_home].position.x, -dx * constants.radius);
-							//atomicAdd(&particles[current_phantom].position.x, dx * constants.radius);
+    if (boundaries == 2) {
+      if (right || left) {
+        cells[4 * g_id + l_id] =
+            ((((unsigned int)(cell_x + addValX) << constants.x_shift) |
+              (unsigned int)cell_y)
+             << 1) |
+            0x01;
+        objects[4 * g_id + l_id] = g_id << 1 | 0x00;
+        l_id++;
+        count++;
+      }
+      if (up || down) {
+        cells[4 * g_id + l_id] = ((((unsigned int)cell_x << constants.x_shift) |
+                                   (unsigned int)(cell_y + addValY))
+                                  << 1) |
+                                 0x01;
+        objects[4 * g_id + l_id] = g_id << 1 | 0x00;
+        l_id++;
+        count++;
+      }
+      unsigned int diag_x = cell_x + addValX;
+      unsigned int diag_y = cell_y + addValY;
+      cells[4 * g_id + l_id] =
+          (((diag_x << constants.x_shift) | diag_y) << 1) | 0x01;
+      objects[4 * g_id + l_id] = g_id << 1 | 0x00;
+      l_id++;
+      count++;
 
-							//atomicAdd(&particles[current_home].position.y, -dy * constants.radius);
-							//atomicAdd(&particles[current_phantom].position.y, dy * constants.radius);
-							/*particles[current_home].position.x -= dx * constants.radius;
-							particles[current_phantom].position.x += dx * constants.radius;*/
+    } else if (boundaries == 1) {
+      if (right || left) {
+        cells[4 * g_id + l_id] =
+            ((((unsigned int)(cell_x + addValX) << constants.x_shift) |
+              (unsigned int)cell_y)
+             << 1) |
+            0x01;
+        objects[4 * g_id + l_id] = g_id << 1 | 0x00;
+        l_id++;
+        count++;
 
-							/*particles[current_home].position.y -= dy * constants.radius;
-							particles[current_phantom].position.y += dy * constants.radius;*/
-							//collisions++;
-						}
-					}
-				}
-			}
+        if (cell_y + 1 < constants.height) {
+          cells[4 * g_id + l_id] =
+              ((((unsigned int)(cell_x + addValX) << constants.x_shift) |
+                (unsigned int)(cell_y + 1))
+               << 1) |
+              0x01;
+          objects[4 * g_id + l_id] = g_id << 1 | 0x00;
+          l_id++;
+          count++;
+        }
+        if (cell_y > 0) {
+          cells[4 * g_id + l_id] =
+              ((((unsigned int)(cell_x + addValX) << constants.x_shift) |
+                (unsigned int)(cell_y - 1))
+               << 1) |
+              0x01;
+          objects[4 * g_id + l_id] = g_id << 1 | 0x00;
+          l_id++;
+          count++;
+        }
+      } else if (up || down) {
+        cells[4 * g_id + l_id] = ((((unsigned int)cell_x << constants.x_shift) |
+                                   (unsigned int)(cell_y + addValY))
+                                  << 1) |
+                                 0x01;
+        objects[4 * g_id + l_id] = g_id << 1 | 0x00;
+        l_id++;
+        count++;
 
-			if (i > thread_end || i >= cell_count) {
-				break;
-			}
-			if (i != thread_start || !blockIdx.x && !threadIdx.x) {
-				home_cell_count = 0;
-				phantom_cell_count = 0;
-				cell_start_index = i;
+        if (cell_x + 1 < constants.width) {
+          cells[4 * g_id + l_id] =
+              ((((unsigned int)(cell_x + 1) << constants.x_shift) |
+                (unsigned int)(cell_y + addValY))
+               << 1) |
+              0x01;
+          objects[4 * g_id + l_id] = g_id << 1 | 0x00;
+          l_id++;
+          count++;
+        }
+        if (cell_x > 0) {
+          cells[4 * g_id + l_id] =
+              ((((unsigned int)(cell_x - 1) << constants.x_shift) |
+                (unsigned int)(cell_y + addValY))
+               << 1) |
+              0x01;
+          objects[4 * g_id + l_id] = g_id << 1 | 0x00;
+          l_id++;
+          count++;
+        }
+      }
+    }
 
-			}
-			last = cells[i] >> 1;
-		}
-		if (cell_start_index + 1) {
-			if (objects[i] & 0x01) {
-				home_cell_count++;
-			}
-			else {
-				phantom_cell_count++;
-			}
-		}
-		i++;
-	}
-	//__syncthreads();
-	//s[threadIdx.x] = collisions;
-	//dSum(s, collisions_count);
+    for (unsigned int pad = l_id; pad < 4; pad++) {
+      cells[4 * g_id + pad] = UINT_MAX;
+      objects[4 * g_id + pad] = g_id << 2;
+    }
+
+    g_id += blockDim.x * gridDim.x;
+  }
+
+  s[threadIdx.x] = count;
+  __syncthreads();
+  dSum(s, cell_count);
 }
 
-void CollisionDetection::check_collision() {
-	initData << <num_blocks, num_threads, sizeof(unsigned int)* num_threads >> > (d_particles, d_cells, d_objects, d_cell_count, constantsInitData);
+__global__ void countCollisionCells(unsigned int* cells, unsigned int* objects,
+                                    uint3* collision_cells_uncompacted,
+                                    unsigned int* collision_cells_ids,
+                                    ConstantsCountCollisionCells constants) {
+  unsigned int thread_start =
+      (blockIdx.x * blockDim.x + threadIdx.x) * constants.cells_per_thread;
+  unsigned int thread_end = thread_start + constants.cells_per_thread;
+  unsigned int last = UINT_MAX;
+  unsigned int i = thread_start;
 
-	//unsigned int * h_cells = new unsigned int[cells_size];
-	//cudaMemcpy(h_cells, d_cells, sizeof(unsigned int) * cells_size, cudaMemcpyDeviceToHost);
-	//float* pos_x = new float[objects_size];
-	//float* pos_y = new float[objects_size];
-	//cudaMemcpy(pos_x, this->d_positions_x, sizeof(float) * objects_size, cudaMemcpyDeviceToHost);
-	//cudaMemcpy(pos_y, this->d_positions_y, sizeof(float) * objects_size, cudaMemcpyDeviceToHost);
-	//for (int i = 0; i < objects_size; i++) {
-	//	printf("%i\t%i\t%i\t%i\t%i\t%f\t%f\n",i, h_cells[i * 4], h_cells[i * 4 + 1], h_cells[i * 4 + 2], h_cells[i * 4 + 3], pos_x[i], pos_y[i]);
-	//	if (h_cells[i * 4] == 0 || h_cells[i * 4 + 1] == 0 || h_cells[i * 4 + 2] == 0 || h_cells[i * 4 + 3] == 0) {
-	//		int zzz = 2;
-	//	}
-	//}
+  unsigned int home_cell_count;
+  unsigned int phantom_cell_count;
+  int cell_start_index = -1;
 
-	for (int shift = 0; shift < this->min_bits_for_hash; shift += this->bit_step_size) {
-		radixSetup << <num_blocks, num_threads, sizeof(unsigned int)* shared_memory_size >> > (this->d_radices, this->d_cells, shift, constantsRadixSetUp);
-		radixSum << <num_blocks, num_threads, sizeof(unsigned int)* padded_groups >> > (this->d_radices, this->d_radices_prefix_sum, constantsRadixSum);
-		radixReorder << <num_blocks, num_threads, sizeof(unsigned int)* (shared_memory_size + num_radices) >> > (this->d_radices_prefix_sum, this->d_radices, this->d_cells, this->d_objects, this->d_cells_tmp, this->d_objects_tmp, shift, constantsRadixReorder);
+  while (1) {
+    if (i >= constants.cell_count || cells[i] >> 1 != last) {
+      if (cell_start_index + 1) {
+        collision_cells_uncompacted[last].x = cell_start_index;
+        collision_cells_uncompacted[last].y = home_cell_count;
+        collision_cells_uncompacted[last].z = phantom_cell_count;
 
-		this->cells_swap = this->d_cells;
-		this->d_cells = this->d_cells_tmp;
-		this->d_cells_tmp = this->cells_swap;
+        if (home_cell_count > 0 && (home_cell_count + phantom_cell_count) > 1) {
+          unsigned int cell_y = last & ((1 << constants.x_shift) - 1);
+          unsigned int cell_x = last >> constants.x_shift;
+          unsigned int list_id = (cell_x & 1) | ((cell_y & 1) << 1);
+          collision_cells_ids[list_id * constants.max_grid_capacity + last] = 1;
+        }
+      }
 
-		this->objects_swap = this->d_objects;
-		this->d_objects = this->d_objects_tmp;
-		this->d_objects_tmp = this->objects_swap;
-	}
+      if (i > thread_end || i >= constants.cell_count) break;
 
-	/*unsigned int* h_cells = new unsigned int[cells_size];
-	unsigned int* h_objects = new unsigned int[cells_size];
-	cudaMemcpy(h_cells, this->d_cells, sizeof(float) * cells_size, cudaMemcpyDeviceToHost);
-	cudaMemcpy(h_objects, this->d_objects, sizeof(float) * cells_size, cudaMemcpyDeviceToHost);
-	for (int i = 0; i < cells_size; i++) {
-		printf("%i\t%i\n", h_cells[i], h_objects[i]);
-	}*/
+      if (i != thread_start || (!blockIdx.x && !threadIdx.x)) {
+        home_cell_count = 0;
+        phantom_cell_count = 0;
+        cell_start_index = i;
+      }
+      last = cells[i] >> 1;
+    }
 
-
-	cudaMemcpy(&this->h_cell_count, d_cell_count, sizeof(unsigned int), cudaMemcpyDeviceToHost);
-	this->cells_per_thread = (h_cell_count - 1) / (num_blocks * num_threads) + 1;
-	
-
-	cellColide << <num_blocks, num_threads, sizeof(unsigned int)* shared_size >> > (d_cells, d_objects, cells_per_thread, d_particles, d_collisions_count, h_cell_count, constantsCellColide, d_particles_coliding_indices);
-	//cudaMemcpy(&this->collisions_count, d_collisions_count, sizeof(unsigned int), cudaMemcpyDeviceToHost);
-	//cudaMemset(d_collisions_count, 0, sizeof(unsigned int));
-	cudaMemset(d_cell_count, 0, sizeof(unsigned int));
-	//printf("%u\n", this->collisions_count);
-	//if (collisions_count == 0) {
-	//	Particle* h_particles = new Particle[objects_size];
-	//	unsigned int* h_cells = new unsigned int[cells_size];
-	//	unsigned int* h_objects = new unsigned int[cells_size];
-	//	cudaMemcpy(h_particles, this->d_particles, sizeof(Particle) * objects_size, cudaMemcpyDeviceToHost);
-	//	cudaMemcpy(h_cells, this->d_cells, sizeof(unsigned int) * cells_size, cudaMemcpyDeviceToHost);
-	//	cudaMemcpy(h_objects, this->d_objects, sizeof(unsigned int) * cells_size, cudaMemcpyDeviceToHost);
-
-	//	for (int i = 1; i < cells_size; i++) {
-	//		if (h_cells[i] > 2031616) {
-	//			h_particles[h_objects[i] >> 1].position.x;
-	//			Particle p1 = h_particles[h_objects[i] >> 1];
-	//			Particle p2 = h_particles[h_objects[i-1] >> 1];
-	//			float d = sqrt(pow(p1.position.x - p2.position.x, 2) + pow(p1.position.y - p2.position.y, 2));
-	//			if (d < radius && d > 0.0f) {
-	//				//count++;
-	//				printf("%f\n", d);
-	//			}
-	//			int a = 2;
-	//		}
-	//	}
-	//	int count = 0;
-	//	for (int i = 0; i < objects_size; i++) {
-	//		for (int j = i + 1; j < objects_size; j++) {
-	//			Particle p1 = h_particles[i];
-	//			Particle p2 = h_particles[j];
-	//			float d = sqrt(pow(p1.position.x - p2.position.x, 2) + pow(p1.position.y - p2.position.y, 2));
-	//			if (d < radius) {
-	//				count++;
-	//				printf("%f\n", d);
-	//			}
-	//		}
-	//	}
-	//	int adas = 2;
-	//}
-	//unsigned int* particles_coliding_indices = new unsigned int[2000 * num_blocks];
-	//Particle* h_particles = new Particle[objects_size];
-	//cudaMemcpy(particles_coliding_indices, this->d_particles_coliding_indices, sizeof(unsigned int) * 2000 * num_blocks, cudaMemcpyDeviceToHost);
-	//cudaMemcpy(h_particles, this->d_particles, sizeof(Particle) * objects_size, cudaMemcpyDeviceToHost);
-	//printf("sorted cells:\n");
-	//for (int i = 0; i < 1000 * num_blocks; i++) {
-	//	Particle p1, p2;
-	//	p1.position = h_particles[particles_coliding_indices[2 * i]].position;
-	//	p2.position = h_particles[particles_coliding_indices[2 * i + 1]].position;
-	//	float d = sqrt(pow(p1.position.x - p2.position.x, 2) + pow(p1.position.y - p2.position.y, 2));
-	//	if ((particles_coliding_indices[2 * i] == 21915 || particles_coliding_indices[2 * i] == 44088) || (particles_coliding_indices[2 * i + 1] == 21915 || particles_coliding_indices[2 * i + 1] == 44088)) {
-	//	//if (d > 0 && d < 0.399) {
-	//		//printf("%-5i: %-10f %f --- %-10f %f distance: %f id1:%i, id2 : %i\n", i, p1.position.x, p1.position.y, p2.position.x, p2.position.y, d, particles_coliding_indices[2 * i], particles_coliding_indices[2 * i + 1]);
-	//	}
-	//	//}
-	//}
-	//if(collisions_count < 1) {
-	//	int abc = 2;
-	//}
-	//it++;
-	//printf("--------------------------------------------------------------------------------\n");
-	//printf("--------------------------------------------------------------------------------\n");
-	//printf("--------------------------------------------------------------------------------\n");
+    if (cell_start_index + 1) {
+      if (objects[i] & 0x01)
+        home_cell_count++;
+      else
+        phantom_cell_count++;
+    }
+    i++;
+  }
 }
 
-void CollisionDetection::setup(float scene_width, float scene_height, unsigned int size, float radius, Particle* d_particles)
-{
-	this->zero = 0;
-	this->objects_size = size;
-	this->scene_width = scene_width;
-	this->scene_height = scene_height;
-	this->radius = radius;
-	this->diameter = 2.0f * this->radius;
-	this->width = ceilf(this->scene_width / this->diameter);
-	this->height = ceilf(this->scene_height / this->diameter);
-	unsigned int min_bits_for_width = count_bits(width);
-	unsigned int min_bits_for_height = count_bits(height);
-	this->min_bits_for_hash = min_bits_for_height + min_bits_for_width + 1;
+__global__ void compactCollisionCells(uint3* d_uncompacted,
+                                      unsigned int* d_scanned_ids,
+                                      uint3* d_compacted_cells,
+                                      unsigned int max_grid_capacity,
+                                      unsigned int x_shift) {
+  unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= max_grid_capacity) return;
 
-	int deviceId;
-	cudaGetDevice(&deviceId);
-	cudaDeviceProp device_prop;
-	cudaGetDeviceProperties(&device_prop, deviceId);
-	shared_size = device_prop.sharedMemPerBlock / 4;
-	this->num_blocks = 2 * device_prop.multiProcessorCount;
-	this->threads_per_group = device_prop.warpSize;
-	int num_passes = 1;
-	bool tooMuchThreads = false;
-	int shared_needed;
-	while (1) {
-		this->bit_step_size = (min_bits_for_hash - 1) / num_passes + 1;
-		shared_needed = pow(2, this->bit_step_size);
+  uint3 cell_data = d_uncompacted[idx];
+  unsigned int home = cell_data.y;
+  unsigned int phantom = cell_data.z;
 
-		if (shared_needed < shared_size) {
-			this->groups_per_block = (shared_size) / shared_needed;
-			while (this->threads_per_group * this->groups_per_block >= device_prop.maxThreadsPerBlock) {
-				tooMuchThreads = true;
-				this->groups_per_block--;
-			}
-			break;
-		}
-		else {
-			num_passes++;
-		}
-	}
-	if (!tooMuchThreads) {
-		this->groups_per_block--;
-	}
+  if (home > 0 && (home + phantom) > 1) {
+    unsigned int cell_y = idx & ((1 << x_shift) - 1);
+    unsigned int cell_x = idx >> x_shift;
+    unsigned int list_id = (cell_x & 1) | ((cell_y & 1) << 1);
 
-	this->cells_size = 4 * this->objects_size;
-	this->diameter_squared = this->diameter * this->diameter;
-	this->max_distance_squared = pow(this->diameter * 0.7071067f - this->radius, 2);
-	this->num_radices = pow(2, this->bit_step_size);
-	this->num_threads = this->groups_per_block * this->threads_per_group;
-	this->num_groups = this->num_blocks * this->groups_per_block;
-	this->padded_groups = succesive_power_of_two(this->num_groups);
-	this->padded_blocks = succesive_power_of_two(this->num_blocks);
-	this->part_size = (this->objects_size - 1) / num_groups + 1;
-	this->radices_per_block = (this->num_radices - 1) / this->num_blocks + 1;
-	this->radices_size = this->num_groups * this->num_radices;
-	this->cells_per_group = (cells_size - 1) / num_groups + 1;
-	this->shared_memory_size = this->groups_per_block * this->num_radices;
-	this->x_shift = min_bits_for_height;
-
-	printf("bit_step_size: %u, num_blocks: %u, groups_per_block: %u, threads_per_group: %u, x_shift: %u, min_bits_for_hash: %u, diameter_squaredr: %f\n",
-		this->bit_step_size, this->num_blocks, this->groups_per_block, this->threads_per_group, this->x_shift, this->min_bits_for_hash, this->diameter_squared);
-
-	this->d_particles = d_particles;
-
-	constantsInitData.diameter = this->diameter;
-	constantsInitData.max_distance_squared = this->max_distance_squared;
-	constantsInitData.radius = this->radius;
-	constantsInitData.x_shift = this->x_shift;
-	constantsInitData.objects_size = this->objects_size;
-
-	constantsRadixSetUp.groups_per_block = this->groups_per_block;
-	constantsRadixSetUp.threads_per_group = this->threads_per_group;
-	constantsRadixSetUp.cells_per_group = this->cells_per_group;
-	constantsRadixSetUp.shared_memory_size = this->shared_memory_size;
-	constantsRadixSetUp.num_radices = this->num_radices;
-	constantsRadixSetUp.cells_size = this->cells_size;
-
-	constantsRadixSum.num_groups = this->num_groups;
-	constantsRadixSum.num_radices = this->num_radices;
-	constantsRadixSum.padded_groups = this->padded_groups;
-	constantsRadixSum.radices_per_block = this->radices_per_block;
-
-	constantsRadixReorder.cells_per_group = this->cells_per_group;
-	constantsRadixReorder.cells_size = this->cells_size;
-	constantsRadixReorder.groups_per_block = this->groups_per_block;
-	constantsRadixReorder.num_radices = this->num_radices;
-	constantsRadixReorder.padded_blocks = this->padded_blocks;
-	constantsRadixReorder.radices_per_block = this->radices_per_block;
-	constantsRadixReorder.threads_per_group = this->threads_per_group;
-
-	constantsCellColide.diameter_squared = this->diameter_squared;
-	constantsCellColide.radius = this->radius;
-	constantsCellColide.objects_size = this->objects_size;
-	constantsCellColide.scene_hieght = this->scene_height - this->diameter;
-	constantsCellColide.scene_width = this->scene_width - this->diameter;
-
-	cudaMalloc((void**)&this->d_radices, sizeof(unsigned int) * this->radices_size);
-	cudaMalloc((void**)&this->d_radices_prefix_sum, sizeof(unsigned int) * (this->num_radices + this->num_blocks));
-	cudaMalloc((void**)&this->d_cells, sizeof(unsigned int) * this->cells_size);
-	cudaMalloc((void**)&this->d_cells_tmp, sizeof(unsigned int) * this->cells_size);
-	cudaMalloc((void**)&this->d_objects, sizeof(unsigned int) * this->cells_size);
-	cudaMalloc((void**)&this->d_objects_tmp, sizeof(unsigned int) * this->cells_size);
-	cudaMalloc((void**)&this->d_cell_count, sizeof(unsigned int));
-	cudaMalloc((void**)&this->d_collisions_count, sizeof(unsigned int));
-	cudaMalloc((void**)&this->d_particles_coliding_indices, sizeof(unsigned int) * 2000 * num_blocks);
+    unsigned int dest_idx = d_scanned_ids[list_id * max_grid_capacity + idx];
+    d_compacted_cells[dest_idx] = cell_data;
+  }
 }
 
-CollisionDetection::CollisionDetection(float width, float height, unsigned int size, float radius, Particle* d_particles)
-{
-	this->setup(width, height, size, radius, d_particles);
-}
+__global__ void resolveCollisions(uint3* compacted_cells,
+                                  unsigned int* sorted_objects,
+                                  float2* positions, float diameter,
+                                  float radius, unsigned int x_shift,
+                                  unsigned int start_idx, unsigned int end_idx,
+                                  unsigned int pass_T,
+                                  unsigned int* d_collisions_count) {
+  extern __shared__ unsigned int s_collisions[];
+  unsigned int idx = start_idx + blockIdx.x * blockDim.x + threadIdx.x;
+  unsigned int local_count = 0;
 
-unsigned int CollisionDetection::succesive_power_of_two(unsigned int n) {
-	if (n == 0)
-		return 0;
-	n = n - 1;
-	n = n | (n >> 1);
-	n = n | (n >> 2);
-	n = n | (n >> 4);
-	n = n | (n >> 8);
-	n = n | (n >> 16);
-	return n + 1;
+  if (idx < end_idx) {
+    uint3 cell_data = compacted_cells[idx];
+    unsigned int cell_start = cell_data.x;
+    unsigned int home_count = cell_data.y;
+    unsigned int phantom_count = cell_data.z;
+    unsigned int total_count = home_count + phantom_count;
+
+    float dist_threshold = 4.0f * radius * radius;
+
+    for (unsigned int i = 0; i < home_count; ++i) {
+      unsigned int raw_objA = sorted_objects[cell_start + i];
+      unsigned int objA_id = raw_objA >> 1;
+      float2 posA = positions[objA_id];
+
+      for (unsigned int j = i + 1; j < total_count; ++j) {
+        unsigned int raw_objB = sorted_objects[cell_start + j];
+        unsigned int objB_id = raw_objB >> 1;
+        float2 posB = positions[objB_id];
+
+        processPair(objA_id, objB_id, posA, posB, positions, radius,
+                    dist_threshold, local_count);
+      }
+    }
+  }
+
+  s_collisions[threadIdx.x] = local_count;
+  __syncthreads();
+  dSum(s_collisions, d_collisions_count);
 }
 
 unsigned int CollisionDetection::count_bits(unsigned int n) {
-	unsigned int count = 0;
-	while (n) {
-		count++;
-		n >>= 1;
-	}
-	return count;
+  unsigned int count = 0;
+  while (n) {
+    count++;
+    n >>= 1;
+  }
+  return count;
 }
 
+CollisionDetection::~CollisionDetection() {
+  if (d_cells) cudaFree(d_cells);
+  if (d_objects) cudaFree(d_objects);
+  if (d_cell_count) cudaFree(d_cell_count);
+  if (d_collision_cells_uncompacted) cudaFree(d_collision_cells_uncompacted);
+  if (d_collision_cells_ids) cudaFree(d_collision_cells_ids);
+  if (d_collisions_count) cudaFree(d_collisions_count);
+  if (d_collision_cells) cudaFree(d_collision_cells);
+  if (d_control_bits) cudaFree(d_control_bits);
+}
+
+void CollisionDetection::setup(float scene_width, float scene_height,
+                               unsigned int size, float radius) {
+  this->scene_width = scene_width;
+  this->scene_height = scene_height;
+  this->objects_size = size;
+  this->radius = radius;
+
+  this->diameter = 3.0f * radius;
+
+  this->width = ceilf(scene_width / diameter) + 1;
+  this->height = ceilf(scene_height / diameter) + 1;
+
+  unsigned int min_bits_for_width = count_bits(width);
+  unsigned int min_bits_for_height = count_bits(height);
+
+  this->min_bits_for_hash = 32;
+  this->x_shift = min_bits_for_height;
+  this->max_grid_capacity = width * (1 << x_shift);
+  this->cells_size = 4 * objects_size;
+
+  int deviceId;
+  cudaGetDevice(&deviceId);
+  cudaDeviceProp device_prop;
+  cudaGetDeviceProperties(&device_prop, deviceId);
+
+  this->num_blocks = 2 * device_prop.multiProcessorCount;
+  this->num_threads = 256;
+  this->shared_size = num_threads * sizeof(unsigned int);
+
+  cudaMalloc((void**)&d_cells, sizeof(unsigned int) * cells_size);
+  cudaMalloc((void**)&d_objects, sizeof(unsigned int) * cells_size);
+  cudaMalloc((void**)&d_cell_count, sizeof(unsigned int));
+  cudaMalloc((void**)&d_collisions_count, sizeof(unsigned int));
+  cudaMalloc((void**)&d_collision_cells_uncompacted,
+             sizeof(uint3) * max_grid_capacity);
+  cudaMalloc((void**)&d_collision_cells_ids,
+             sizeof(unsigned int) * (4 * max_grid_capacity + 1));
+  cudaMalloc((void**)&d_collision_cells, sizeof(uint3) * max_grid_capacity);
+  cudaMalloc((void**)&d_control_bits, sizeof(unsigned int) * objects_size);
+
+  sorter.setup(cells_size, min_bits_for_hash, d_cells, d_objects);
+}
+
+void CollisionDetection::check_collision(float2* d_positions) {
+  cudaMemset(d_cell_count, 0, sizeof(unsigned int));
+  cudaMemset(d_collisions_count, 0, sizeof(unsigned int));
+  cudaMemset(d_collision_cells_uncompacted, 0,
+             sizeof(uint3) * max_grid_capacity);
+
+  cudaMemset(d_collision_cells_ids, 0,
+             sizeof(unsigned int) * (4 * max_grid_capacity + 1));
+
+  cudaMemset(d_collision_cells, 0, sizeof(uint3) * max_grid_capacity);
+
+  ConstantsInitData constantsInitData;
+  constantsInitData.diameter = diameter;
+  constantsInitData.radius = radius;
+  constantsInitData.x_shift = x_shift;
+  constantsInitData.objects_size = objects_size;
+  constantsInitData.width = width;
+  constantsInitData.height = height;
+
+  initData<<<num_blocks, num_threads, shared_size>>>(
+      d_positions, d_cells, d_objects, d_cell_count, d_control_bits,
+      constantsInitData);
+
+  sorter.sort();
+
+  cudaMemcpy(&h_cell_count, d_cell_count, sizeof(unsigned int),
+             cudaMemcpyDeviceToHost);
+
+  unsigned int cells_per_thread =
+      (h_cell_count - 1) / (num_blocks * num_threads) + 1;
+
+  ConstantsCountCollisionCells constantsCountCollisionCells;
+  constantsCountCollisionCells.cell_count = h_cell_count;
+  constantsCountCollisionCells.cells_per_thread = cells_per_thread;
+  constantsCountCollisionCells.x_shift = x_shift;
+  constantsCountCollisionCells.max_grid_capacity = max_grid_capacity;
+
+  countCollisionCells<<<num_blocks, num_threads>>>(
+      d_cells, d_objects, d_collision_cells_uncompacted, d_collision_cells_ids,
+      constantsCountCollisionCells);
+
+  runGlobalPrefixSum(d_collision_cells_ids, 4 * max_grid_capacity + 1);
+
+  unsigned int compact_threads = 256;
+  unsigned int compact_blocks =
+      (max_grid_capacity + compact_threads - 1) / compact_threads;
+
+  compactCollisionCells<<<compact_blocks, compact_threads>>>(
+      d_collision_cells_uncompacted, d_collision_cells_ids, d_collision_cells,
+      max_grid_capacity, x_shift);
+
+  unsigned int pass_endpoints[5];
+  pass_endpoints[0] = 0;
+  cudaMemcpy(&pass_endpoints[1], &d_collision_cells_ids[1 * max_grid_capacity],
+             sizeof(unsigned int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&pass_endpoints[2], &d_collision_cells_ids[2 * max_grid_capacity],
+             sizeof(unsigned int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&pass_endpoints[3], &d_collision_cells_ids[3 * max_grid_capacity],
+             sizeof(unsigned int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&pass_endpoints[4], &d_collision_cells_ids[4 * max_grid_capacity],
+             sizeof(unsigned int), cudaMemcpyDeviceToHost);
+
+  for (unsigned int pass_T = 0; pass_T < 4; ++pass_T) {
+    unsigned int start_idx = pass_endpoints[pass_T];
+    unsigned int end_idx = pass_endpoints[pass_T + 1];
+    unsigned int cells_in_pass = end_idx - start_idx;
+
+    if (cells_in_pass > 0) {
+      unsigned int resolve_threads = 256;
+      unsigned int resolve_blocks =
+          (cells_in_pass + resolve_threads - 1) / resolve_threads;
+      unsigned int resolve_shared_size = resolve_threads * sizeof(unsigned int);
+
+      resolveCollisions<<<resolve_blocks, resolve_threads,
+                          resolve_shared_size>>>(
+          d_collision_cells, d_objects, d_positions, diameter, radius, x_shift,
+          start_idx, end_idx, pass_T, d_collisions_count);
+    }
+  }
+  unsigned int boundary_threads = 256;
+  unsigned int boundary_blocks =
+      (objects_size + boundary_threads - 1) / boundary_threads;
+  applyBoundaries<<<boundary_blocks, boundary_threads>>>(
+      d_positions, scene_width, scene_height, radius, objects_size);
+
+  cudaMemcpy(&h_gpu_collisions, d_collisions_count, sizeof(unsigned int),
+             cudaMemcpyDeviceToHost);
+}
+
+unsigned int CollisionDetection::get_gpu_collisions_count() const {
+  return h_gpu_collisions;
+}
+
+void CollisionDetection::get_sorted_data(std::vector<unsigned int>& h_cells,
+                                         std::vector<unsigned int>& h_objects,
+                                         unsigned int& out_cell_count) const {
+  out_cell_count = this->h_cell_count;
+  if (h_cells.size() < cells_size) h_cells.resize(cells_size);
+  if (h_objects.size() < cells_size) h_objects.resize(cells_size);
+
+  cudaMemcpy(h_cells.data(), d_cells, sizeof(unsigned int) * cells_size,
+             cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_objects.data(), d_objects, sizeof(unsigned int) * cells_size,
+             cudaMemcpyDeviceToHost);
+}
