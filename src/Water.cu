@@ -223,7 +223,7 @@ void FlipFluid::init() {
       make_float4(cell_size + 0.00001, size.x - cell_size - 0.00001,
                   cell_size + 0.00001, size.y - cell_size - 0.00001);
   mem_size = resolution.x * resolution.y;
-
+// std::cout<<mem_size<<'\n'; 2500
   cudaMalloc(&d_busy_cells, sizeof(ushort2) * mem_size);
   cudaMalloc(&d_busy_cells_size, sizeof(unsigned int));
 

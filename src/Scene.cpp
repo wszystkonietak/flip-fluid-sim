@@ -136,5 +136,6 @@ void Scene::loadCanvases() {
 }
 
 void Scene::loadFluids() {
+  //  particles.emplace_back(1., 1., 0.00054f, 1000000);
   fluids.emplace_back(glm::vec2(1.0f, 1.0f));
 }
